@@ -21,13 +21,13 @@ def test_compton_scattering_is_valid():
 def test_electron_number_is_conserved():
     valid, message, *_ = validate_request(DiagramRequest(1, 0, 2, 1, 2))
     assert not valid
-    assert "電荷" in message
+    assert "Charge" in message
 
 
 def test_odd_photon_stub_count_is_rejected():
     valid, message, *_ = validate_request(DiagramRequest(1, 0, 1, 1, 2))
     assert not valid
-    assert "偶数" in message
+    assert "even" in message
 
 
 def test_pair_annihilation_is_valid():

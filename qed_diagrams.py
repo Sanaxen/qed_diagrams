@@ -51,27 +51,27 @@ def validate_request(req: DiagramRequest) -> tuple[bool, str, int, int]:
     ef = req.electron_in + req.electron_out + req.positron_in + req.positron_out
     photons = req.photon_in + req.photon_out
     if req.electron_in + req.positron_out != req.electron_out + req.positron_in:
-        return False, "電荷が保存されていません。e⁻(in)+e⁺(out)=e⁻(out)+e⁺(in) が必要です。", 0, 0
+        return False, "Charge is not conserved. The condition e⁻(in) + e⁺(out) = e⁻(out) + e⁺(in) is required.", 0, 0
     if photons > req.vertices:
-        return False, "外線光子数は頂点数を超えられません。", 0, 0
+        return False, "The number of external photons cannot exceed the number of vertices.", 0, 0
     if ef > 2 * req.vertices:
-        return False, "電子外線数が、頂点に接続できる電子線数を超えています。", 0, 0
+        return False, "The number of external fermion lines exceeds the capacity of the vertices.", 0, 0
     photon_stubs = req.vertices - photons
     fermion_stubs = 2 * req.vertices - ef
     if photon_stubs % 2:
-        return False, "頂点数 − 光子外線数は偶数である必要があります。", 0, 0
+        return False, "Vertex count minus external photon count must be even.", 0, 0
     if fermion_stubs % 2:
-        return False, "2×頂点数 − 電子外線数は偶数である必要があります。", 0, 0
+        return False, "Twice the vertex count minus the external fermion count must be even.", 0, 0
     if req.vertices == 0:
-        return False, "頂点数は1以上にしてください。", 0, 0
+        return False, "Vertex count must be at least 1.", 0, 0
     internal_fermions = fermion_stubs // 2
     internal_photons = photon_stubs // 2
     calculated_loops = internal_fermions + internal_photons - req.vertices + 1
     if calculated_loops < 0:
-        return False, "この外線数と頂点数では連結図を構成できません。", 0, 0
+        return False, "These external-line and vertex counts cannot form a connected diagram.", 0, 0
     if req.loops != calculated_loops:
-        return False, f"指定条件から決まるループ次数は L={calculated_loops} です。頂点数またはループ次数を変更してください。", 0, 0
-    return True, "生成可能な次数条件です。", internal_fermions, internal_photons
+        return False, f"These conditions imply loop order L={calculated_loops}. Change either the vertex count or loop order.", 0, 0
+    return True, "The requested perturbative order is valid.", internal_fermions, internal_photons
 
 
 def _pair_stubs(stubs: list[int], rng: random.Random) -> list[tuple[int, int]] | None:
