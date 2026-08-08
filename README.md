@@ -1,6 +1,10 @@
 # QED Diagram Studio
 
+[README_jp.md](.\README_jp.md)  
+
 A Streamlit app that generates representative examples of connected Feynman diagrams based on the number of external electron, positron, and photon lines, the number of QED vertices, and the loop order.
+
+![qed_diagrams_all](.\qed_diagrams_all_2loop.png)
 
 ## Launch
 
