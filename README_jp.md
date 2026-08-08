@@ -1,11 +1,11 @@
 # QED diagram studio
 
-[README_en.md](.\README.md) 
+[README_en.md](https://github.com/Sanaxen/qed_diagrams/blob/main/README.md) 
 
 電子・陽電子・光子の入出力外線数、QED頂点数、ループ次数から、連結ファインマン図の代表例を生成するStreamlitアプリです。
 
 
-![qed_diagrams_all](.\qed_diagrams_all_2loop.png)
+![qed_diagrams_all](https://github.com/Sanaxen/qed_diagrams/blob/main/qed_diagrams_all_2loop.png)
 
 ## 起動
 
