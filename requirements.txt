@@ -5,3 +5,4 @@ numpy==2.5.1
 feynman==2.1.1
 pyfeyn2==2.4.3
 Pillow>=11.3,<13
+pydot>=4.0,<5

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from io import BytesIO
 from itertools import permutations
 import random
+import shutil
 
 import matplotlib
 matplotlib.use("Agg")
@@ -216,7 +217,12 @@ def passes_furry_theorem(diagram: Diagram) -> bool:
     return all(len(cycle) % 2 == 0 for cycle in nx.simple_cycles(fermions))
 
 
-def generate_diagrams(req: DiagramRequest, limit: int = 12, seed: int = 7) -> list[Diagram]:
+def generate_diagrams(
+    req: DiagramRequest,
+    limit: int = 12,
+    seed: int = 7,
+    one_pi_only: bool = True,
+) -> list[Diagram]:
     ok, _, _, _ = validate_request(req)
     if not ok:
         return []
@@ -262,7 +268,7 @@ def generate_diagrams(req: DiagramRequest, limit: int = 12, seed: int = 7) -> li
                 diagram = Diagram(graph, external[:])
                 if not passes_furry_theorem(diagram):
                     continue
-                if not is_one_particle_irreducible(diagram):
+                if one_pi_only and not is_one_particle_irreducible(diagram):
                     continue
                 signature = _signature(diagram)
                 bucket = found.setdefault(signature, [])
@@ -273,7 +279,52 @@ def generate_diagrams(req: DiagramRequest, limit: int = 12, seed: int = 7) -> li
     return [diagram for bucket in found.values() for diagram in bucket]
 
 
-def draw_diagram(diagram: Diagram, title: str = ""):
+def graphviz_available() -> bool:
+    """Return whether the Graphviz engine used by the layout is installed."""
+    return shutil.which("neato") is not None
+
+
+def _graphviz_positions(graph: nx.Graph) -> dict[int, np.ndarray]:
+    """Run Graphviz neato and return positions in NetworkX node coordinates."""
+    if not graphviz_available():
+        raise RuntimeError("Graphviz 'neato' executable was not found on PATH.")
+    raw = nx.nx_pydot.pydot_layout(graph, prog="neato")
+    return {vertex: np.asarray(xy, dtype=float) for vertex, xy in raw.items()}
+
+
+def _untangle_two_vertex_loops(
+    graph: nx.MultiGraph,
+    pos: dict[int, np.ndarray],
+    fermion_cycles: list[list[int]],
+) -> None:
+    """Swap loop endpoints when their photon destinations are reversed."""
+    for cycle in fermion_cycles:
+        if len(cycle) != 2:
+            continue
+        first, second = cycle
+        cycle_vertices = set(cycle)
+
+        def photon_destinations(vertex: int) -> list[np.ndarray]:
+            destinations = []
+            for left, right, data in graph.edges(vertex, data=True):
+                other = right if left == vertex else left
+                if data["kind"] == "photon" and other not in cycle_vertices:
+                    destinations.append(pos[other])
+            return destinations
+
+        first_targets = photon_destinations(first)
+        second_targets = photon_destinations(second)
+        if not first_targets or not second_targets:
+            continue
+        loop_axis = pos[second] - pos[first]
+        if np.linalg.norm(loop_axis) < 1e-9:
+            continue
+        target_axis = np.mean(second_targets, axis=0) - np.mean(first_targets, axis=0)
+        if np.dot(loop_axis, target_axis) < 0:
+            pos[first], pos[second] = pos[second].copy(), pos[first].copy()
+
+
+def draw_diagram(diagram: Diagram, title: str = "", layout_mode: str = "qed"):
     graph = diagram.graph
     n = len(graph.nodes)
     fermion_flow = nx.DiGraph()
@@ -291,40 +342,70 @@ def draw_diagram(diagram: Diagram, title: str = ""):
         if (kind == "electron" and direction == "out") or (kind == "positron" and direction == "in")
     ]
 
-    # Put the open fermion backbone on a horizontal time axis. Closed-loop
-    # vertices are lifted away from it, making loop structure immediately visible.
-    backbone: list[int] = []
-    if len(charged_in) == len(charged_out) == 1 and nx.has_path(fermion_flow, charged_in[0], charged_out[0]):
-        backbone = nx.shortest_path(fermion_flow, charged_in[0], charged_out[0])
-        remaining = [v for v in graph.nodes if v not in backbone]
-        simple = nx.Graph(graph)
-        planar, embedding = nx.check_planarity(simple)
-        if planar:
-            initial = {v: np.asarray(xy, dtype=float) for v, xy in nx.planar_layout(embedding).items()}
-        else:
-            initial = {v: np.asarray(xy, dtype=float) for v, xy in nx.kamada_kawai_layout(simple).items()}
+    # Put every open fermion path on a horizontal time axis. Previously only a
+    # single path was fixed, so electron-positron processes with two open paths
+    # could fold one path back over the other.
+    backbones: list[list[int]] = []
+    unused_sinks = set(charged_out)
+    for source in dict.fromkeys(charged_in):
+        candidates = [sink for sink in unused_sinks if nx.has_path(fermion_flow, source, sink)]
+        if not candidates:
+            continue
+        sink = min(candidates, key=lambda target: nx.shortest_path_length(fermion_flow, source, target))
+        backbones.append(nx.shortest_path(fermion_flow, source, sink))
+        unused_sinks.remove(sink)
+    backbone = max(backbones, key=len, default=[])
+    fixed_backbone_vertices = list(dict.fromkeys(vertex for path in backbones for vertex in path))
+    simple = nx.Graph(graph)
+    graphviz_pos = None
+    if layout_mode in {"graphviz", "hybrid"}:
+        try:
+            graphviz_pos = _graphviz_positions(simple)
+        except (RuntimeError, OSError, ImportError):
+            layout_mode = "qed"
 
-        # Every vertex on the continuous open fermion chain is fixed to the
-        # horizontal time axis. Only the remaining loop vertices are relaxed.
-        for vertex, x in zip(backbone, np.linspace(-1.0, 1.0, len(backbone))):
-            initial[vertex] = np.array([x, 0.0])
+    if layout_mode == "graphviz" and graphviz_pos is not None:
+        raw_pos = graphviz_pos
+    elif backbones:
+        remaining = [v for v in graph.nodes if v not in fixed_backbone_vertices]
+        if graphviz_pos is not None:
+            initial = graphviz_pos
+        else:
+            planar, embedding = nx.check_planarity(simple)
+            if planar:
+                initial = {v: np.asarray(xy, dtype=float) for v, xy in nx.planar_layout(embedding).items()}
+            else:
+                initial = {v: np.asarray(xy, dtype=float) for v, xy in nx.kamada_kawai_layout(simple).items()}
+
+        # Each continuous open chain gets its own horizontal lane. Only closed
+        # loop vertices are relaxed by the force-directed layout.
+        all_single_vertex_paths = len(backbones) > 1 and all(len(path) == 1 for path in backbones)
+        lane_heights = np.linspace(-0.30, 0.30, len(backbones)) if len(backbones) > 1 else [0.0]
+        singleton_x = np.linspace(-1.0, 1.0, len(backbones)) if all_single_vertex_paths else None
+        for path_index, (path, lane_y) in enumerate(zip(backbones, lane_heights)):
+            if all_single_vertex_paths:
+                x_values = [singleton_x[path_index]]
+                lane_y = 0.0
+            else:
+                x_values = np.linspace(-1.0, 1.0, len(path)) if len(path) > 1 else [0.0]
+            for vertex, x in zip(path, x_values):
+                initial[vertex] = np.array([x, lane_y])
         raw_pos = {
             v: np.asarray(xy, dtype=float)
             for v, xy in nx.spring_layout(
                 simple,
                 pos=initial,
-                fixed=backbone,
+                fixed=fixed_backbone_vertices,
                 seed=19,
                 iterations=300,
                 k=0.72,
             ).items()
         }
-        if remaining and np.mean([raw_pos[v][1] for v in remaining]) < 0:
+        if len(backbones) == 1 and remaining and np.mean([raw_pos[v][1] for v in remaining]) < 0:
             raw_pos = {v: np.array([xy[0], -xy[1]]) for v, xy in raw_pos.items()}
     elif n == 2:
         raw_pos = {0: np.array([0.0, 1.0]), 1: np.array([0.0, -1.0])}
     else:
-        simple = nx.Graph(graph)
         planar, embedding = nx.check_planarity(simple)
         raw_pos = nx.planar_layout(embedding) if planar else nx.kamada_kawai_layout(simple)
     raw = np.array(list(raw_pos.values()))
@@ -332,17 +413,90 @@ def draw_diagram(diagram: Diagram, title: str = ""):
     scale = max(np.ptp(raw[:, 0]), np.ptp(raw[:, 1]), 1.0)
     pos = {v: 0.5 + 0.38 * (np.asarray(xy) - center_raw) / scale for v, xy in raw_pos.items()}
 
-    # A two-vertex vacuum-polarization loop can collapse into an almost
-    # vertical pair during force-directed layout.  Give it a stable horizontal
-    # diameter so its two fermion arcs and attached photons remain separable.
+    # Contract every two-vertex fermion loop and detect a pure photon chain
+    # between two charged external vertices. This covers one or several vacuum-
+    # polarization insertions in series; a generic planar layout otherwise
+    # folds the chain and can make the topology look incorrect.
+    vertically_arranged_cycles: set[tuple[int, ...]] = set()
+    external_kinds: dict[int, list[str]] = {vertex: [] for vertex in graph.nodes}
+    for vertex, kind, _ in diagram.external:
+        external_kinds[vertex].append(kind)
+    loop_blocks = [tuple(sorted(cycle)) for cycle in fermion_cycles if len(cycle) == 2]
+    block_for: dict[int, tuple[str, int]] = {}
+    for index, cycle in enumerate(loop_blocks):
+        for vertex in cycle:
+            block_for[vertex] = ("loop", index)
+    for vertex in graph.nodes:
+        block_for.setdefault(vertex, ("vertex", vertex))
+    block_graph = nx.Graph()
+    block_graph.add_nodes_from(set(block_for.values()))
+    for left, right, data in graph.edges(data=True):
+        if data["kind"] == "photon" and block_for[left] != block_for[right]:
+            block_graph.add_edge(block_for[left], block_for[right])
+    outer_blocks = [
+        ("vertex", vertex)
+        for vertex in graph.nodes
+        if len(external_kinds[vertex]) >= 2 and block_for[vertex] == ("vertex", vertex)
+    ]
+    chain_path = None
+    if (
+        len(outer_blocks) == 2
+        and loop_blocks
+        and nx.is_connected(block_graph)
+        and all(degree <= 2 for _, degree in block_graph.degree())
+    ):
+        candidate = nx.shortest_path(block_graph, outer_blocks[0], outer_blocks[1])
+        if len(candidate) == len(block_graph):
+            top_block = next(
+                (block for block in outer_blocks if external_kinds[block[1]].count("electron") >= 2),
+                outer_blocks[0],
+            )
+            chain_path = candidate if candidate[0] == top_block else list(reversed(candidate))
+
+    if chain_path and layout_mode != "graphviz":
+        ordered_vertices: list[int] = []
+        for block_index, block in enumerate(chain_path):
+            if block[0] == "vertex":
+                ordered_vertices.append(block[1])
+                continue
+            cycle = loop_blocks[block[1]]
+            previous_block = chain_path[block_index - 1]
+            entry = next(
+                vertex for vertex in cycle
+                if any(
+                    data["kind"] == "photon" and block_for[other] == previous_block
+                    for left, right, data in graph.edges(vertex, data=True)
+                    for other in [right if left == vertex else left]
+                )
+            )
+            exit_vertex = next(vertex for vertex in cycle if vertex != entry)
+            ordered_vertices.extend((entry, exit_vertex))
+            vertically_arranged_cycles.add(cycle)
+        for vertex, y in zip(ordered_vertices, np.linspace(0.80, 0.20, len(ordered_vertices))):
+            pos[vertex] = np.array([0.5, y])
+
+    # Other two-vertex vacuum-polarization loops are given a stable horizontal
+    # diameter so their two fermion arcs and attached photons remain separable.
     for cycle in fermion_cycles:
-        if len(cycle) != 2 or any(vertex in backbone for vertex in cycle):
+        if (
+            layout_mode == "graphviz"
+            or
+            len(cycle) != 2
+            or any(vertex in backbone for vertex in cycle)
+            or tuple(sorted(cycle)) in vertically_arranged_cycles
+        ):
             continue
         left_vertex, right_vertex = sorted(cycle)
         loop_center = 0.5 * (pos[left_vertex] + pos[right_vertex])
         half_width = max(0.085, 0.5 * abs(pos[right_vertex][0] - pos[left_vertex][0]))
         pos[left_vertex] = loop_center + np.array([-half_width, 0.0])
         pos[right_vertex] = loop_center + np.array([half_width, 0.0])
+
+    # Graph layout engines optimize vertex positions without knowing that the
+    # two vertices of a fermion loop may be exchanged freely.  Choose the
+    # orientation whose photon destinations have the same order as the loop
+    # vertices; this removes the avoidable X-shaped pair of photon lines.
+    _untangle_two_vertex_loops(graph, pos, fermion_cycles)
     fig, ax = plt.subplots(figsize=(8.4, 5.2), facecolor="#0e1422")
     ax.set_facecolor("#0e1422")
     renderer = FeynmanDiagram(ax)
@@ -355,6 +509,8 @@ def draw_diagram(diagram: Diagram, title: str = ""):
     external_by_vertex: dict[int, list[int]] = {v: [] for v in graph.nodes}
     for index, (v, _, _) in enumerate(diagram.external):
         external_by_vertex[v].append(index)
+
+    placed_external_routes: list[tuple[np.ndarray, np.ndarray]] = []
 
     def external_route_score(vertex: int, endpoint: np.ndarray) -> float:
         """Penalize external-leg routes that pass through internal geometry."""
@@ -381,6 +537,16 @@ def draw_diagram(diagram: Diagram, title: str = ""):
             o3, o4 = orientation(a, b, start), orientation(a, b, endpoint)
             if o1 * o2 < 0 and o3 * o4 < 0:
                 score += 100.0
+        for old_start, old_endpoint in placed_external_routes:
+            # Several external particles may legitimately meet at one vertex.
+            if np.linalg.norm(old_start - start) < 1e-9:
+                continue
+            o1 = orientation(start, endpoint, old_start)
+            o2 = orientation(start, endpoint, old_endpoint)
+            o3 = orientation(old_start, old_endpoint, start)
+            o4 = orientation(old_start, old_endpoint, endpoint)
+            if o1 * o2 < 0 and o3 * o4 < 0:
+                score += 120.0
         # In a tie, prefer the side facing away from the diagram center.
         score -= 0.2 * float(np.dot(endpoint - start, start - center))
         return score
@@ -388,9 +554,11 @@ def draw_diagram(diagram: Diagram, title: str = ""):
     endpoints: dict[int, np.ndarray] = {}
     for v, indices in external_by_vertex.items():
         radial = pos[v] - center
-        if backbone and v == charged_in[0]:
+        path_start = next((path for path in backbones if len(path) > 1 and v == path[0]), None)
+        path_end = next((path for path in backbones if len(path) > 1 and v == path[-1]), None)
+        if path_start:
             radial = np.array([-1.0, -0.18])
-        elif backbone and v == charged_out[0]:
+        elif path_end:
             radial = np.array([1.0, -0.18])
         if np.linalg.norm(radial) < 0.1:
             radial = np.array([0.0, 1.0])
@@ -398,7 +566,7 @@ def draw_diagram(diagram: Diagram, title: str = ""):
         fan = np.linspace(-0.58, 0.58, len(indices)) if len(indices) > 1 else [0.0]
         for index, angle_offset in zip(indices, fan):
             _, kind, _ = diagram.external[index]
-            particle_angle = base_angle
+            preferred_angle = base_angle + angle_offset
             if kind == "photon":
                 fermion_neighbors = []
                 for left, right, data in graph.edges(v, data=True):
@@ -414,14 +582,30 @@ def draw_diagram(diagram: Diagram, title: str = ""):
                 normal = np.array([-tangent[1], tangent[0]])
                 if np.linalg.norm(normal) > 1e-9:
                     normal /= np.linalg.norm(normal)
-                    candidates = (normal, -normal)
+                    preferred_normals = (normal, -normal)
                     normal = min(
-                        candidates,
+                        preferred_normals,
                         key=lambda candidate: external_route_score(v, pos[v] + 0.24 * candidate),
                     )
-                    particle_angle = np.arctan2(normal[1], normal[0])
-            angle = particle_angle + angle_offset
+                    preferred_angle = np.arctan2(normal[1], normal[0]) + angle_offset
+
+            # Search both sides of the vertex for a clear external route.  A
+            # crossing costs far more than rotating away from the preferred
+            # radial/normal direction, so a clean route wins whenever one is
+            # available while the usual layout is retained in uncomplicated
+            # diagrams.
+            preferred = np.array([np.cos(preferred_angle), np.sin(preferred_angle)])
+            candidate_angles = preferred_angle + np.linspace(-np.pi, np.pi, 32, endpoint=False)
+
+            def candidate_score(angle: float) -> float:
+                direction = np.array([np.cos(angle), np.sin(angle)])
+                endpoint = pos[v] + 0.24 * direction
+                direction_penalty = 2.0 * (1.0 - float(np.dot(direction, preferred)))
+                return external_route_score(v, endpoint) + direction_penalty
+
+            angle = min(candidate_angles, key=candidate_score)
             endpoints[index] = pos[v] + 0.24 * np.array([np.cos(angle), np.sin(angle)])
+            placed_external_routes.append((pos[v].copy(), endpoints[index].copy()))
 
     # Convert to pyfeyn2/FeynML so topology and bending metadata use the
     # standard open-source representation.
@@ -456,10 +640,14 @@ def draw_diagram(diagram: Diagram, title: str = ""):
     grouped: dict[tuple[int, int], list[tuple[int, dict]]] = {}
     for edge_index, (a, b, _, data) in enumerate(edge_records):
         grouped.setdefault(tuple(sorted((a, b))), []).append((edge_index, data))
+    bridge_pairs = {tuple(sorted(edge)) for edge in nx.bridges(nx.Graph(graph))}
+    compact_loop_vertices = {
+        vertex for cycle in fermion_cycles if len(cycle) == 2 for vertex in cycle
+    }
 
     # Reserve the side used by an external photon and route internal photons
     # primarily to the opposite side. Crossing intervals alone switch sides.
-    backbone_index = {vertex: index for index, vertex in enumerate(backbone)}
+    backbone_index = {vertex: index for index, vertex in enumerate(backbone)} if len(backbones) == 1 else {}
     external_photon_sides = []
     for index, (vertex, kind, _) in enumerate(diagram.external):
         if kind == "photon" and vertex in backbone_index:
@@ -480,7 +668,25 @@ def draw_diagram(diagram: Diagram, title: str = ""):
             reference_center = np.mean([pos[vertex] for vertex in local_cycle], axis=0)
         else:
             reference_center = center
+        # For a two-vertex loop, its center is exactly the edge midpoint and
+        # provides no side information. Fall back to the whole diagram so an
+        # accompanying photon is placed on the exposed outer side.
+        if np.linalg.norm(midpoint - reference_center) < 1e-9:
+            reference_center = center
         return 1 if np.dot(normal, midpoint - reference_center) >= 0 else -1
+
+    def compact_loop_exit_lane(a: int, b: int) -> int:
+        """Bend a photon away from the two-vertex loop it is leaving."""
+        loop_vertex = a if a in compact_loop_vertices else b
+        loop_cycle = next(cycle for cycle in fermion_cycles if len(cycle) == 2 and loop_vertex in cycle)
+        loop_center = np.mean([pos[vertex] for vertex in loop_cycle], axis=0)
+        exposed_direction = pos[loop_vertex] - loop_center
+        segment = pos[b] - pos[a]
+        normal = np.array([-segment[1], segment[0]])
+        # The sign is expressed in the actual a -> b drawing direction.  The
+        # two exit photons therefore bulge toward opposite exposed sides of
+        # the loop instead of folding inward and crossing its fermion arcs.
+        return 1 if np.dot(normal, exposed_direction) >= 0 else -1
 
     intervals = []
     for edge_index, (a, b, _, data) in enumerate(edge_records):
@@ -490,6 +696,10 @@ def draw_diagram(diagram: Diagram, title: str = ""):
                 fermion_lanes[edge_index] = outward_lane(a, b)
             continue
         if len(grouped[tuple(sorted((a, b)))]) > 1:
+            continue
+        photon_leaves_compact_loop = (a in compact_loop_vertices) != (b in compact_loop_vertices)
+        if photon_leaves_compact_loop:
+            photon_lanes[edge_index] = compact_loop_exit_lane(a, b)
             continue
         if a in backbone_index and b in backbone_index:
             left, right = sorted((backbone_index[a], backbone_index[b]))
@@ -527,22 +737,38 @@ def draw_diagram(diagram: Diagram, title: str = ""):
             if len(fermion_indices) >= 2:
                 for lane, edge_index in zip((1, -1, 2, -2), fermion_indices):
                     parallel_lanes[edge_index] = lane
-                for lane, edge_index in zip((2, -2, 3, -3), photon_indices):
-                    parallel_lanes[edge_index] = lane
+                outer_side = outward_lane(a, b)
+                for offset, edge_index in enumerate(photon_indices):
+                    parallel_lanes[edge_index] = outer_side * (2 + offset)
                 # A vacuum-polarization subgraph has two oppositely directed
                 # fermion arcs and one or more photon lines sharing endpoints.
                 # Keep the fermion loop compact and put photons clearly outside
                 # it; otherwise the wavy line appears to weave through the loop.
                 for edge_index in fermion_indices:
-                    parallel_spreads[edge_index] = 0.30
-                for offset, edge_index in enumerate(photon_indices):
-                    parallel_spreads[edge_index] = min(0.82, 0.68 + 0.07 * offset)
+                    parallel_spreads[edge_index] = 0.28
+                for edge_index in photon_indices:
+                    # Keep below a half ellipse. Values above 0.5 make the path
+                    # turn back and weave through the compact fermion loop.
+                    parallel_spreads[edge_index] = 0.47
             else:
                 for lane, (edge_index, _) in zip((1, -1, 2, -2), edges):
                     parallel_lanes[edge_index] = lane
         for local_index, (edge_index, data) in enumerate(edges):
             source, target = data.get("source", a), data.get("target", b)
-            curved = len(edges) > 1 or data["kind"] == "photon" or (source, target) in cycle_edges
+            pair = (a, b)
+            photon_leaves_compact_loop = data["kind"] == "photon" and (
+                (a in compact_loop_vertices) != (b in compact_loop_vertices)
+            )
+            photon_needs_bend = (
+                data["kind"] == "photon"
+                and pair not in bridge_pairs
+            )
+            curved = (
+                len(edges) > 1
+                or photon_needs_bend
+                or photon_leaves_compact_loop
+                or (source, target) in cycle_edges
+            )
             common = dict(linewidth=2.1, color="#9ee6ff" if data["kind"] == "fermion" else "#ffd36a")
             if curved:
                 lane = parallel_lanes.get(edge_index, photon_lanes.get(edge_index, fermion_lanes.get(edge_index)))
@@ -550,6 +776,7 @@ def draw_diagram(diagram: Diagram, title: str = ""):
                     side = "up" if lane > 0 else "down"
                     spread = parallel_spreads.get(
                         edge_index,
+                        0.30 if photon_leaves_compact_loop else
                         min(0.49, (0.41 if len(edges) > 1 else 0.36) + 0.055 * (abs(lane) - 1)),
                     )
                 else:

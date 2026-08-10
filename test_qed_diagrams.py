@@ -1,13 +1,17 @@
 from qed_diagrams import (
+    _untangle_two_vertex_loops,
     Diagram,
     DiagramRequest,
     generate_diagrams,
+    graphviz_available,
     is_one_particle_irreducible,
     loop_order_from_counts,
     passes_furry_theorem,
     validate_request,
     vertex_count_from_loops,
 )
+import networkx as nx
+import numpy as np
 
 
 def test_compton_scattering_is_valid():
@@ -16,6 +20,9 @@ def test_compton_scattering_is_valid():
     assert valid
     assert (fermions, photons) == (1, 0)
     assert generate_diagrams(req) == []
+    tree_diagrams = generate_diagrams(req, one_pi_only=False)
+    assert tree_diagrams
+    assert all(not is_one_particle_irreducible(diagram) for diagram in tree_diagrams)
 
 
 def test_electron_number_is_conserved():
@@ -34,6 +41,7 @@ def test_pair_annihilation_is_valid():
     req = DiagramRequest(1, 0, 0, 2, 2, positron_in=1, loops=0)
     assert validate_request(req)[0]
     assert generate_diagrams(req) == []
+    assert generate_diagrams(req, one_pi_only=False)
 
 
 def test_one_loop_electron_self_energy_is_valid():
@@ -53,6 +61,7 @@ def test_moller_vertices_have_one_incoming_and_one_outgoing_arrow():
     req = DiagramRequest(2, 0, 2, 0, 2, loops=0)
     diagrams = generate_diagrams(req, limit=10)
     assert diagrams == []
+    assert generate_diagrams(req, limit=10, one_pi_only=False)
 
 
 def test_one_loop_self_energy_is_1pi():
@@ -85,3 +94,23 @@ def test_vertex_and_loop_order_are_interchangeable():
     assert vertex_count_from_loops(external_lines=3, loops=2) == 5
     assert loop_order_from_counts(external_lines=3, vertices=5) == 2
     assert loop_order_from_counts(external_lines=3, vertices=4) is None
+
+
+def test_graphviz_availability_check_returns_boolean():
+    assert isinstance(graphviz_available(), bool)
+
+
+def test_two_vertex_loop_is_swapped_to_match_photon_destinations():
+    graph = nx.MultiGraph()
+    graph.add_edge(0, 1, kind="fermion", source=0, target=1)
+    graph.add_edge(0, 1, kind="fermion", source=1, target=0)
+    graph.add_edge(0, 3, kind="photon")
+    graph.add_edge(1, 2, kind="photon")
+    pos = {
+        0: np.array([-1.0, 1.0]),
+        1: np.array([1.0, 1.0]),
+        2: np.array([-1.0, 0.0]),
+        3: np.array([1.0, 0.0]),
+    }
+    _untangle_two_vertex_loops(graph, pos, [[0, 1]])
+    assert pos[0][0] > pos[1][0]

@@ -1,34 +1,68 @@
-# QED Diagram Studio
+# QED diagram studio
 
-[README_jp.md](https://github.com/Sanaxen/qed_diagrams/blob/main/README_jp.md)  
-
-A Streamlit app that generates representative examples of connected Feynman diagrams based on the number of external electron, positron, and photon lines, the number of QED vertices, and the loop order.
 
 ![qed_diagrams_all](https://github.com/Sanaxen/qed_diagrams/blob/main/qed_diagrams_all_2loop.png)
 
-## Launch
+A Streamlit application for enumerating and drawing QED Feynman diagrams from
+incoming and outgoing electron, positron, and photon counts. The perturbative
+order can be specified by either vertex count or loop order.
+
+## Start the application on Windows
+
+Double-click `run_app.bat`, or run it from PowerShell:
 
 ```powershell
-.\.venv\Scripts\streamlit.exe run streamlit_app.py
+.\run_app.bat
 ```
 
-Open `http://localhost:8501` in your browser.
+The script creates `.venv`, installs missing Python dependencies, and starts
+the application at `http://localhost:8501`.
 
-## Current Scope
+## Graphviz installation
 
-- Particles: electrons (`e⁻`), positrons (`e⁺`), and photons (`γ`)
-- Validates charge conservation and the specified loop order
-- Includes only One-Particle Irreducible (1PI) diagrams
-- Excludes closed fermion loops with an odd number of photon vertices (based on Furry's theorem)
-- Removes duplicates using strict graph isomorphism checking
-- Renders using the open-source `feynman` library (v2.1.1)
-- Uses `pyfeyn2` (v2.4.3) for FeynML structures and automatic line-bending logic
-- Assigns internal photon lines to separate upper and lower lanes to prevent overlap
-- Allows input of either the number of vertices or the loop order, automatically calculating the other
-- Each vertex connects two electron lines and one photon line
-- Generates connected diagrams (excluding self-loops)
-- For large inputs, generates up to 24 unique representative examples rather than an exhaustive list
+Graphviz is optional for the standard QED layout and required for the two
+Graphviz layout options. On the first `run_app.bat` launch, the script checks
+for `neato.exe`. If it is missing, the script asks:
 
-## Definition of 1PI
+```text
+Install Graphviz now with winget? [Y/N]
+```
 
-Only diagrams that remain connected after the removal of any single internal propagator are included. Consequently, standard exchange-type tree diagrams—which split into two separate components when an internal line is cut—are not displayed.
+Choose `Y` to install it automatically. Choose `N` to continue with the QED
+layout. The application remains usable without Graphviz.
+
+To install Graphviz manually:
+
+```powershell
+winget install --id Graphviz.Graphviz -e
+```
+
+Then close and reopen the terminal and verify:
+
+```powershell
+neato -V
+```
+
+If `neato` is still not found, add the Graphviz `bin` directory, normally
+`C:\Program Files\Graphviz\bin`, to the Windows `PATH` environment variable.
+
+The Python adapter `pydot` is installed automatically from `requirements.txt`.
+
+## Layout modes
+
+- Standard QED layout
+- Graphviz `neato` layout
+- Graphviz initial layout followed by QED refinement (recommended)
+
+If Graphviz is selected but unavailable, the app displays a warning and safely
+falls back to the standard QED layout.
+
+## Diagram selection
+
+- Enforces charge conservation and the QED vertex rules
+- Supports vertex-count and loop-order input
+- Supports 1PI-only or all connected diagrams, including tree-level diagrams
+- Excludes vanishing odd-photon fermion loops using Furry's theorem
+- Removes graph-isomorphic duplicates
+- Supports up to 1000 displayed diagrams
+- Exports individual PNG/SVG files and combined contact sheets

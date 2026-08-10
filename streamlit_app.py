@@ -10,6 +10,7 @@ from qed_diagrams import (
     draw_diagram,
     export_figure,
     generate_diagrams,
+    graphviz_available,
     loop_order_from_counts,
     validate_request,
     vertex_count_from_loops,
@@ -17,8 +18,8 @@ from qed_diagrams import (
 
 
 @st.cache_data(max_entries=16, show_spinner="Enumerating QED diagrams…")
-def cached_generate_diagrams(request: DiagramRequest, limit: int):
-    return generate_diagrams(request, limit)
+def cached_generate_diagrams(request: DiagramRequest, limit: int, one_pi_only: bool):
+    return generate_diagrams(request, limit, one_pi_only=one_pi_only)
 
 
 def make_contact_sheets(
@@ -89,12 +90,30 @@ with st.sidebar:
             step=1,
             help="If more diagrams satisfy the conditions, only this many will be displayed.",
         )
+        one_pi_only = st.checkbox(
+            "1PI diagrams only",
+            value=True,
+            help="Clear this checkbox to include connected reducible diagrams, including tree-level diagrams.",
+        )
+        use_graphviz = st.checkbox(
+            "Use Graphviz layout",
+            value=False,
+            help="Use Graphviz neato to place the graph automatically.",
+        )
+        refine_graphviz = st.checkbox(
+            "Apply QED refinement after Graphviz",
+            value=True,
+            disabled=not use_graphviz,
+            help="Start from Graphviz, then align fermion paths and separate QED loops and external lines.",
+        )
         submitted = st.form_submit_button("Generate diagrams", type="primary", icon=":material/auto_awesome:")
     st.caption("Fermion arrows point in opposite directions for electrons and positrons.")
 
 if "request" not in st.session_state:
     st.session_state.request = DiagramRequest(1, 0, 1, 0, 2, 0, 0, 1)
     st.session_state.limit = 8
+st.session_state.setdefault("one_pi_only", True)
+st.session_state.setdefault("layout_mode", "qed")
 if submitted:
     st.session_state.pop("contact_sheet_result", None)
     st.session_state.pop("contact_sheet_key", None)
@@ -112,6 +131,8 @@ if submitted:
         int(positron_in), int(positron_out), int(loops),
     )
     st.session_state.limit = int(limit)
+    st.session_state.one_pi_only = bool(one_pi_only)
+    st.session_state.layout_mode = "hybrid" if use_graphviz and refine_graphviz else "graphviz" if use_graphviz else "qed"
 
 req = st.session_state.request
 valid, message, internal_fermions, internal_photons = validate_request(req)
@@ -127,13 +148,27 @@ if not valid:
     st.error(message, icon=":material/error:")
     st.stop()
 
-diagrams = cached_generate_diagrams(req, st.session_state.limit)
+one_pi_only = st.session_state.one_pi_only
+layout_mode = st.session_state.layout_mode
+if layout_mode in {"graphviz", "hybrid"} and not graphviz_available():
+    st.warning(
+        "Graphviz neato was not found. Install Graphviz and add its bin directory to PATH. "
+        "The QED layout is being used for now.",
+        icon=":material/warning:",
+    )
+    effective_layout_mode = "qed"
+else:
+    effective_layout_mode = layout_mode
+diagrams = cached_generate_diagrams(req, st.session_state.limit, one_pi_only)
 if not diagrams:
-    st.warning("No diagram satisfies the QED rules, the 1PI condition, and Furry's theorem. Tree diagrams are normally excluded because cutting one internal line disconnects them.", icon=":material/warning:")
+    condition = "the 1PI condition, and " if one_pi_only else ""
+    st.warning(f"No diagram satisfies the QED rules, {condition}Furry's theorem.", icon=":material/warning:")
     st.stop()
 
 st.success(f"Generated {len(diagrams)} distinct representative diagrams.", icon=":material/check_circle:")
-st.caption("Blue arrows are fermion lines, yellow waves are photon lines, and red dots are QED vertices. Exact graph isomorphism removes duplicates. pyfeyn2 is used for structure and bend metadata.")
+selection_label = "1PI only" if one_pi_only else "all connected diagrams (including reducible and tree-level diagrams)"
+layout_label = {"qed": "QED", "graphviz": "Graphviz", "hybrid": "Graphviz + QED refinement"}[effective_layout_mode]
+st.caption(f"Selection: {selection_label}. Layout: {layout_label}. Blue arrows are fermion lines, yellow waves are photon lines, and red dots are QED vertices. Exact graph isomorphism removes duplicates. pyfeyn2 is used for structure and bend metadata.")
 
 page_size = 8
 total_pages = math.ceil(len(diagrams) / page_size)
@@ -157,7 +192,7 @@ for row_start in range(page_start, page_end, 2):
     for column, index in zip(columns, range(row_start, min(row_start + 2, page_end))):
         diagram = diagrams[index]
         with column.container(border=True):
-            fig = draw_diagram(diagram, f"Diagram {index + 1}")
+            fig = draw_diagram(diagram, f"Diagram {index + 1}", effective_layout_mode)
             st.pyplot(fig, width="stretch")
             png = export_figure(fig, "png")
             svg = export_figure(fig, "svg")
@@ -192,12 +227,12 @@ with st.container(border=True):
     )
     st.caption("The contact sheet is generated only when you press this button.")
 
-contact_key = (req, len(diagrams), contact_sheet_mode, diagrams_per_sheet)
+contact_key = (req, len(diagrams), one_pi_only, effective_layout_mode, contact_sheet_mode, diagrams_per_sheet)
 if create_contact_sheet:
     all_pngs: list[bytes] = []
     progress = st.progress(0, text="Rendering diagrams for the contact sheet…")
     for index, diagram in enumerate(diagrams):
-        fig = draw_diagram(diagram, f"Diagram {index + 1}")
+        fig = draw_diagram(diagram, f"Diagram {index + 1}", effective_layout_mode)
         all_pngs.append(export_figure(fig, "png"))
         plt.close(fig)
         progress.progress((index + 1) / len(diagrams), text=f"Rendered {index + 1}/{len(diagrams)} diagrams")
